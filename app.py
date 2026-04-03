@@ -15,6 +15,7 @@ from datetime import datetime, timedelta
 import warnings
 from typing import Dict, Optional, List, Tuple
 import time
+import os
 
 # ML
 try:
@@ -28,13 +29,17 @@ from sklearn.preprocessing import StandardScaler, RobustScaler
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.metrics import mean_absolute_error
 
-# Quantum
-try:
-    from qiskit import QuantumCircuit, transpile
-    from qiskit_aer import AerSimulator
-    HAS_QUANTUM = True
-except:
-    HAS_QUANTUM = False
+# Quantum - disable on cloud to avoid issues
+IS_CLOUD = os.environ.get('STREAMLIT_SHARING_MODE') or os.environ.get('STREAMLIT_SERVER_HEADLESS')
+HAS_QUANTUM = False  # Disable quantum on cloud - too slow
+
+if not IS_CLOUD:
+    try:
+        from qiskit import QuantumCircuit, transpile
+        from qiskit_aer import AerSimulator
+        HAS_QUANTUM = True
+    except:
+        HAS_QUANTUM = False
 
 warnings.filterwarnings('ignore')
 

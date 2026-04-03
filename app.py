@@ -454,40 +454,72 @@ h1, h2, h3 { font-weight: 500 !important; letter-spacing: -0.02em; }
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @st.cache_data(ttl=120, show_spinner=False)
+@st.cache_data(ttl=300, show_spinner=False)
 def fetch_market_data(ticker: str) -> Tuple[Optional[pd.DataFrame], Optional[Dict]]:
-    """Fetch comprehensive market data."""
-    try:
-        stock = yf.Ticker(ticker)
-        
-        # 2 years of daily data
-        df = stock.history(period="2y", interval="1d")
-        if df.empty or len(df) < 100:
+    """Fetch comprehensive market data with retries."""
+    import time
+    
+    max_retries = 3
+    
+    for attempt in range(max_retries):
+        try:
+            stock = yf.Ticker(ticker)
+            
+            # 2 years of daily data
+            df = stock.history(period="2y", interval="1d")
+            
+            if df.empty or len(df) < 50:
+                # Try shorter period
+                df = stock.history(period="1y", interval="1d")
+            
+            if df.empty or len(df) < 50:
+                # Try even shorter
+                df = stock.history(period="6mo", interval="1d")
+            
+            if df.empty or len(df) < 30:
+                if attempt < max_retries - 1:
+                    time.sleep(1)
+                    continue
+                return None, None
+            
+            df = df.reset_index()
+            
+            # Handle timezone
+            if df['Date'].dt.tz is not None:
+                df['Date'] = df['Date'].dt.tz_localize(None)
+            else:
+                df['Date'] = pd.to_datetime(df['Date'])
+            
+            # Get info safely
+            try:
+                info = stock.info
+            except:
+                info = {}
+            
+            current = df['Close'].iloc[-1]
+            prev = df['Close'].iloc[-2] if len(df) > 1 else current
+            
+            return df, {
+                'ticker': ticker,
+                'name': info.get('shortName', info.get('longName', ticker)),
+                'price': current,
+                'prev_close': prev,
+                'change': current - prev,
+                'change_pct': ((current - prev) / prev) * 100 if prev != 0 else 0,
+                'high_52w': df['High'].tail(min(252, len(df))).max(),
+                'low_52w': df['Low'].tail(min(252, len(df))).min(),
+                'volume': df['Volume'].iloc[-1],
+                'avg_volume': df['Volume'].tail(min(20, len(df))).mean(),
+                'market_cap': info.get('marketCap', 0),
+                'sector': info.get('sector', 'N/A'),
+            }
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(1)
+                continue
             return None, None
-        
-        df = df.reset_index()
-        df['Date'] = pd.to_datetime(df['Date']).dt.tz_localize(None)
-        
-        # Get info
-        info = stock.info
-        current = df['Close'].iloc[-1]
-        prev = df['Close'].iloc[-2]
-        
-        return df, {
-            'ticker': ticker,
-            'name': info.get('shortName', info.get('longName', ticker)),
-            'price': current,
-            'prev_close': prev,
-            'change': current - prev,
-            'change_pct': ((current - prev) / prev) * 100,
-            'high_52w': df['High'].tail(252).max(),
-            'low_52w': df['Low'].tail(252).min(),
-            'volume': df['Volume'].iloc[-1],
-            'avg_volume': df['Volume'].tail(20).mean(),
-            'market_cap': info.get('marketCap', 0),
-            'sector': info.get('sector', 'N/A'),
-        }
-    except Exception as e:
-        return None, None
+    
+    return None, None
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -636,7 +668,7 @@ class PredictionEngine:
         df = engineer_features(df)
         df = df.dropna()
         
-        if len(df) < 100:
+        if len(df) < 50:
             return np.array([]), np.array([]), np.array([])
         
         X = []
@@ -665,14 +697,15 @@ class PredictionEngine:
         """Train ensemble of models with time-series cross-validation."""
         X, y, y_dir = self.prepare_data(df)
         
-        if len(X) < 200:
-            return {'success': False, 'error': 'Insufficient data (need 200+ samples)'}
+        if len(X) < 50:
+            return {'success': False, 'error': 'Insufficient data (need 50+ samples)'}
         
         # Scale features
         X_scaled = self.scaler.fit_transform(X)
         
-        # Time series split for proper validation
-        tscv = TimeSeriesSplit(n_splits=5)
+        # Time series split - adapt splits to data size
+        n_splits = min(5, max(2, len(X) // 50))
+        tscv = TimeSeriesSplit(n_splits=n_splits)
         
         maes = []
         dir_accs = []
@@ -686,14 +719,15 @@ class PredictionEngine:
             
             if HAS_XGB:
                 model = xgb.XGBRegressor(
-                    n_estimators=150,
-                    max_depth=4,
+                    n_estimators=100,
+                    max_depth=3,
                     learning_rate=0.05,
                     subsample=0.8,
                     colsample_bytree=0.8,
                     reg_alpha=0.1,
                     reg_lambda=1.0,
-                    random_state=42
+                    random_state=42,
+                    verbosity=0
                 )
             else:
                 model = GradientBoostingRegressor(
